@@ -1,0 +1,123 @@
+name: CI (CUDA, ubuntu)
+
+# Compila los tres llama.cpp del arnés MoE (ver fase5.md, sección 0):
+#   - stock        ggml-org/llama.cpp       @ 5266f24 (llama.cpp v0.4.0)
+#   - fork-moecache GenerelSchwerz/llama.cpp @ rama moe-cache
+#   - fork-perf    thecodacus/llama.cpp     @ rama perf
+# Cada job deja el SHA exacto compilado en build-info.txt (dentro del artefacto)
+# y en el resumen del job, para poder reproducir los binarios.
+#
+# El commit del stock es fijo (no es punta de rama); los forks son ramas vivas
+# y se pueden fijar manualmente con los inputs ref_* al lanzar el workflow.
+
+on:
+  workflow_dispatch: # allows manual triggering
+    inputs:
+      ref_moecache:
+        description: 'Ref del fork moe-cache (rama o SHA; vacío = moe-cache)'
+        required: false
+        default: 'moe-cache'
+      ref_perf:
+        description: 'Ref del fork perf (rama o SHA; vacío = perf)'
+        required: false
+        default: 'perf'
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/build-cuda-ubuntu.yml'
+      - 'test-moe.py'
+      - 'run_suite_moe.py'
+      - 'test-stock.py'
+      - 'calc.py'
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/build-cuda-ubuntu.yml'
+      - 'test-moe.py'
+      - 'run_suite_moe.py'
+      - 'test-stock.py'
+      - 'calc.py'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  builds:
+    name: cuda-ubuntu (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:12.8.0-devel-ubuntu24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: stock
+            repo: ggml-org/llama.cpp
+            ref: 5266f24da75dc449bd56cbed7addb9c8e4a6a73e
+            archs: '75;86'
+          - name: fork-moecache
+            repo: GenerelSchwerz/llama.cpp
+            ref: moe-cache
+            archs: '75;86'
+          - name: fork-perf
+            repo: thecodacus/llama.cpp
+            ref: perf
+            archs: '75;86'
+
+    steps:
+      - name: Clone (arné de tests)
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: Install dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y build-essential cmake ninja-build git libssl-dev jq
+
+      - name: Checkout llama.cpp (${{ matrix.ref }})
+        run: |
+          git clone --depth 1 https://github.com/${{ matrix.repo }}.git llama.cpp
+          git -C llama.cpp fetch --depth 1 origin "${{ matrix.ref }}"
+          git -C llama.cpp checkout FETCH_HEAD
+
+      - name: Record build info
+        id: info
+        run: |
+          SHA=$(git -C llama.cpp rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          {
+            echo "name=${{ matrix.name }}"
+            echo "repo=${{ matrix.repo }}"
+            echo "ref=${{ matrix.ref }}"
+            echo "sha=$SHA"
+            echo "os=ubuntu-24.04 (container nvidia/cuda:12.8.0-devel-ubuntu24.04)"
+            echo "archs=${{ matrix.archs }}"
+          } > build-info.txt
+
+      - name: Build with CMake (CUDA ${{ matrix.archs }})
+        run: |
+          cmake -S llama.cpp -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES="${{ matrix.archs }}" \
+            -DGGML_CUDA=ON \
+            -DGGML_NATIVE=OFF
+          cmake --build build --config Release -j "$(nproc)"
+
+      - name: Resumen
+        run: |
+          echo "## Build ${{ matrix.name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**repo:** ${{ matrix.repo }} @ ${{ matrix.ref }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**sha:** ${{ steps.info.outputs.sha }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload binarios
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-${{ matrix.name }}-cuda-ubuntu
+          path: |
+            build/bin/*
+            build-info.txt
+          if-no-files-found: error

@@ -1,0 +1,310 @@
+name: CI (Vulkan)
+
+# Compila los tres llama.cpp del arnés MoE (ver fase5.md, sección 0) con el
+# backend Vulkan en lugar de CUDA. Mismo patrón de matriz (3 builds × 3 OS):
+#   - stock        ggml-org/llama.cpp       @ 5266f24 (llama.cpp v0.4.0)
+#   - fork-moecache GenerelSchwerz/llama.cpp @ rama moe-cache
+#   - fork-perf    thecodacus/llama.cpp     @ rama perf
+#
+# Tres puestos (mismos que el workflow oficial de llama.cpp):
+#   - ubuntu-arm64: Mesa + gcc-14 en ARM (sin SDK de LunarG; la basta)
+#   - ubuntu-llvmpipe: Mesa Lavapipe + SDK Vulkan (CPU Vulkan) en x86_64
+#   - windows: SDK Vulkan 1.4.357.0 + toolchain LLVM (x64) en Windows 2025
+#
+# Los runners de GitHub no tienen GPU; esto solo verifica que los flags
+# Vulkan compilan limpio en cada OS. El SHA exacto de cada build queda en
+# build-info.txt (artefacto + resumen del job) para reproducir binarios.
+
+on:
+  workflow_dispatch: # allows manual triggering
+    inputs:
+      ref_moecache:
+        description: 'Ref del fork moe-cache (rama o SHA; vacío = moe-cache)'
+        required: false
+        default: 'moe-cache'
+      ref_perf:
+        description: 'Ref del fork perf (rama o SHA; vacío = perf)'
+        required: false
+        default: 'perf'
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/build-vulkan.yml'
+      - 'test-moe.py'
+      - 'run_suite_moe.py'
+      - 'test-stock.py'
+      - 'calc.py'
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/build-vulkan.yml'
+      - 'test-moe.py'
+      - 'run_suite_moe.py'
+      - 'test-stock.py'
+      - 'calc.py'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  ubuntu-arm64:
+    name: vulkan-ubuntu-arm (${{ matrix.name }})
+    runs-on: ubuntu-24.04-arm
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: stock
+            repo: ggml-org/llama.cpp
+            ref: 5266f24da75dc449bd56cbed7addb9c8e4a6a73e
+          - name: fork-moecache
+            repo: GenerelSchwerz/llama.cpp
+            ref: moe-cache
+          - name: fork-perf
+            repo: thecodacus/llama.cpp
+            ref: perf
+
+    steps:
+      - name: Clone (arné de tests)
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: Install dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-14 g++-14 build-essential \
+            glslc libvulkan-dev spirv-headers \
+            libssl-dev ninja-build jq
+
+      - name: Checkout llama.cpp (${{ matrix.ref }})
+        run: |
+          git clone --depth 1 https://github.com/${{ matrix.repo }}.git llama.cpp
+          git -C llama.cpp fetch --depth 1 origin "${{ matrix.ref }}"
+          git -C llama.cpp checkout FETCH_HEAD
+
+      - name: Record build info
+        id: info
+        run: |
+          SHA=$(git -C llama.cpp rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          {
+            echo "name=${{ matrix.name }}"
+            echo "repo=${{ matrix.repo }}"
+            echo "ref=${{ matrix.ref }}"
+            echo "sha=$SHA"
+            echo "os=ubuntu-24.04-arm"
+            echo "backend=vulkan (mesa + gcc-14)"
+          } > build-info.txt
+
+      - name: Configure & build (Ninja + gcc-14)
+        run: |
+          cmake -S llama.cpp -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc-14 \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DGGML_VULKAN=ON
+          cmake --build build --config Release -j "$(nproc)"
+
+      - name: Resumen
+        run: |
+          echo "## Build ${{ matrix.name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**repo:** ${{ matrix.repo }} @ ${{ matrix.ref }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**sha:** ${{ steps.info.outputs.sha }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload binarios
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-${{ matrix.name }}-vulkan-ubuntu-arm
+          path: |
+            build/bin/*
+            build-info.txt
+          if-no-files-found: error
+
+  ubuntu-llvmpipe:
+    name: vulkan-ubuntu-llvmpipe (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: stock
+            repo: ggml-org/llama.cpp
+            ref: 5266f24da75dc449bd56cbed7addb9c8e4a6a73e
+          - name: fork-moecache
+            repo: GenerelSchwerz/llama.cpp
+            ref: moe-cache
+          - name: fork-perf
+            repo: thecodacus/llama.cpp
+            ref: perf
+
+    steps:
+      - name: Clone (arné de tests)
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: Install Mesa Vulkan drivers
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo add-apt-repository -y ppa:kisak/kisak-mesa
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential mesa-vulkan-drivers \
+            libxcb-xinput0 libxcb-xinerama0 libxcb-cursor-dev \
+            libssl-dev ninja-build jq
+
+      - name: Get latest Vulkan SDK version
+        id: vulkan_sdk_version
+        run: |
+          VULKAN_SDK_VERSION=$(curl -fsSL https://vulkan.lunarg.com/sdk/latest/linux.txt)
+          echo "VULKAN_SDK_VERSION=$VULKAN_SDK_VERSION" >> "$GITHUB_ENV"
+          echo "Detected Vulkan SDK version: $VULKAN_SDK_VERSION"
+
+      - name: Setup Vulkan SDK
+        run: |
+          curl -fsSL \
+            "https://sdk.lunarg.com/sdk/download/${{ env.VULKAN_SDK_VERSION }}/linux/vulkan_sdk.tar.xz" \
+            | tar -xJ
+          echo "VULKAN_SDK=$PWD/vulkan_sdk" >> "$GITHUB_ENV"
+          echo "$PWD/vulkan_sdk/bin" >> "$GITHUB_PATH"
+
+      - name: Checkout llama.cpp (${{ matrix.ref }})
+        run: |
+          git clone --depth 1 https://github.com/${{ matrix.repo }}.git llama.cpp
+          git -C llama.cpp fetch --depth 1 origin "${{ matrix.ref }}"
+          git -C llama.cpp checkout FETCH_HEAD
+
+      - name: Record build info
+        id: info
+        run: |
+          SHA=$(git -C llama.cpp rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          {
+            echo "name=${{ matrix.name }}"
+            echo "repo=${{ matrix.repo }}"
+            echo "ref=${{ matrix.ref }}"
+            echo "sha=$SHA"
+            echo "os=ubuntu-24.04 (mesa lavapipe + Vulkan SDK ${{ env.VULKAN_SDK_VERSION }})"
+            echo "backend=vulkan (lavapipe)"
+          } > build-info.txt
+
+      - name: Build
+        run: |
+          source ./vulkan_sdk/setup-env.sh
+          cmake -S llama.cpp -B build \
+            -DGGML_NATIVE=OFF \
+            -DGGML_VULKAN=ON
+          cmake --build build --config Release -j "$(nproc)"
+
+      - name: Resumen
+        run: |
+          echo "## Build ${{ matrix.name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**repo:** ${{ matrix.repo }} @ ${{ matrix.ref }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**sha:** ${{ steps.info.outputs.sha }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload binarios
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-${{ matrix.name }}-vulkan-ubuntu-llvmpipe
+          path: |
+            build/bin/*
+            build-info.txt
+          if-no-files-found: error
+
+  windows:
+    name: vulkan-windows (${{ matrix.name }})
+    runs-on: windows-2025
+
+    env:
+      VULKAN_VERSION: 1.4.357.0
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: stock
+            repo: ggml-org/llama.cpp
+            ref: 5266f24da75dc449bd56cbed7addb9c8e4a6a73e
+          - name: fork-moecache
+            repo: GenerelSchwerz/llama.cpp
+            ref: moe-cache
+          - name: fork-perf
+            repo: thecodacus/llama.cpp
+            ref: perf
+
+    steps:
+      - name: Clone (arné de tests)
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          $VULKAN_VERSION = "${{ env.VULKAN_VERSION }}"
+          $InstallerUrl = "https://sdk.lunarg.com/sdk/download/$VULKAN_VERSION/windows/vulkansdk-windows-X64-$VULKAN_VERSION.exe"
+          $InstallerPath = "$env:RUNNER_TEMP\VulkanSDK-Installer.exe"
+          curl.exe -o $InstallerPath -L $InstallerUrl
+          & $InstallerPath --accept-licenses --default-answer --confirm-command install
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=C:\VulkanSDK\$VULKAN_VERSION"
+          Add-Content $env:GITHUB_PATH "C:\VulkanSDK\$VULKAN_VERSION\bin"
+
+      - name: Install Ninja
+        shell: pwsh
+        run: |
+          choco install ninja
+
+      - name: Checkout llama.cpp (${{ matrix.ref }})
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/${{ matrix.repo }}.git llama.cpp
+          git -C llama.cpp fetch --depth 1 origin "${{ matrix.ref }}"
+          git -C llama.cpp checkout FETCH_HEAD
+
+      - name: Record build info
+        id: info
+        shell: pwsh
+        run: |
+          $SHA = git -C llama.cpp rev-parse HEAD
+          "sha=$SHA" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "name=${{ matrix.name }}" | Out-File -FilePath build-info.txt -Encoding ascii
+          "repo=${{ matrix.repo }}" | Add-Content -Path build-info.txt
+          "ref=${{ matrix.ref }}" | Add-Content -Path build-info.txt
+          "sha=$SHA" | Add-Content -Path build-info.txt
+          "os=windows-2025" | Add-Content -Path build-info.txt
+          "vulkan=${{ env.VULKAN_VERSION }}" | Add-Content -Path build-info.txt
+          "backend=vulkan" | Add-Content -Path build-info.txt
+
+      - name: Build (LLVM toolchain)
+        shell: pwsh
+        run: |
+          $env:VULKAN_SDK = "C:\VulkanSDK\${{ env.VULKAN_VERSION }}"
+          cmake -S llama.cpp -B build -G "Ninja Multi-Config" `
+            -DCMAKE_TOOLCHAIN_FILE=cmake/x64-windows-llvm.cmake `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DGGML_NATIVE=OFF `
+            -DGGML_VULKAN=ON
+          cmake --build build --config Release -j $env:NUMBER_OF_PROCESSORS
+
+      - name: Resumen
+        shell: pwsh
+        run: |
+          $SHA = git -C llama.cpp rev-parse HEAD
+          "## Build ${{ matrix.name }}" | Add-Content $env:GITHUB_STEP_SUMMARY
+          "**repo:** ${{ matrix.repo }} @ ${{ matrix.ref }}" | Add-Content $env:GITHUB_STEP_SUMMARY
+          "**sha:** $SHA" | Add-Content $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload binarios
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-${{ matrix.name }}-vulkan-windows
+          path: |
+            build/bin/*
+            build-info.txt
+          if-no-files-found: error

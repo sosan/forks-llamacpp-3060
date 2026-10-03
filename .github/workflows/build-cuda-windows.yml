@@ -1,0 +1,118 @@
+name: CI (CUDA, windows)
+
+# Compila los tres llama.cpp del arnés MoE (ver fase5.md, sección 0) en
+# Windows 2022 con CUDA. Manual por ahora: los runners de GitHub no tienen GPU
+# y el job no necesita una, pero cada build tarda bastante.
+# Mismos tres sources que en build-cuda-ubuntu.yml:
+#   - stock        ggml-org/llama.cpp       @ 5266f24 (llama.cpp v0.4.0)
+#   - fork-moecache GenerelSchwerz/llama.cpp @ rama moe-cache
+#   - fork-perf    thecodacus/llama.cpp     @ rama perf
+# El SHA exacto de cada build viaja en build-info.txt (artefacto + resumen).
+
+on:
+  workflow_dispatch: # allows manual triggering
+    inputs:
+      ref_moecache:
+        description: 'Ref del fork moe-cache (rama o SHA; vacío = moe-cache)'
+        required: false
+        default: 'moe-cache'
+      ref_perf:
+        description: 'Ref del fork perf (rama o SHA; vacío = perf)'
+        required: false
+        default: 'perf'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  builds:
+    name: cuda-windows (${{ matrix.name }})
+    runs-on: windows-2022
+
+    env:
+      CUDA_ARCHS: ${{ matrix.archs }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: stock
+            repo: ggml-org/llama.cpp
+            ref: 5266f24da75dc449bd56cbed7addb9c8e4a6a73e
+            cuda: '12.8'
+            archs: '75;86'
+          - name: fork-moecache
+            repo: GenerelSchwerz/llama.cpp
+            ref: moe-cache
+            cuda: '12.8'
+            archs: '75;86'
+          - name: fork-perf
+            repo: thecodacus/llama.cpp
+            ref: perf
+            cuda: '12.8'
+            archs: '75;86'
+
+    steps:
+      - name: Clone (arné de tests)
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: Install Cuda Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: ${{ matrix.cuda }}
+
+      - name: Install Ninja
+        id: install_ninja
+        run: |
+          choco install ninja
+
+      - name: Checkout llama.cpp (${{ matrix.ref }})
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/${{ matrix.repo }}.git llama.cpp
+          git -C llama.cpp fetch --depth 1 origin "${{ matrix.ref }}"
+          git -C llama.cpp checkout FETCH_HEAD
+
+      - name: Record build info
+        id: info
+        shell: pwsh
+        run: |
+          $SHA = git -C llama.cpp rev-parse HEAD
+          "sha=$SHA" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "name=${{ matrix.name }}" | Out-File -FilePath build-info.txt -Encoding ascii
+          "repo=${{ matrix.repo }}" | Add-Content -Path build-info.txt
+          "ref=${{ matrix.ref }}" | Add-Content -Path build-info.txt
+          "sha=$SHA" | Add-Content -Path build-info.txt
+          "os=windows-2022" | Add-Content -Path build-info.txt
+          "cuda=${{ matrix.cuda }}" | Add-Content -Path build-info.txt
+          "archs=${{ matrix.archs }}" | Add-Content -Path build-info.txt
+
+      - name: Build
+        id: cmake_build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S llama.cpp -B build -G "Ninja Multi-Config" ^
+            -DCMAKE_CUDA_ARCHITECTURES="%CUDA_ARCHS%" ^
+            -DGGML_CUDA=ON ^
+            -DGGML_NATIVE=OFF
+          cmake --build build --config Release -j %NUMBER_OF_PROCESSORS%
+
+      - name: Resumen
+        shell: pwsh
+        run: |
+          $SHA = git -C llama.cpp rev-parse HEAD
+          "## Build ${{ matrix.name }}" | Add-Content $env:GITHUB_STEP_SUMMARY
+          "**repo:** ${{ matrix.repo }} @ ${{ matrix.ref }}" | Add-Content $env:GITHUB_STEP_SUMMARY
+          "**sha:** $SHA" | Add-Content $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload binarios
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-${{ matrix.name }}-cuda-windows
+          path: |
+            build/bin/*
+            build-info.txt
+          if-no-files-found: error
