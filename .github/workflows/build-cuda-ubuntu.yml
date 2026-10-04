@@ -21,23 +21,7 @@ on:
         description: 'Ref del fork perf (rama o SHA; vacío = perf)'
         required: false
         default: 'perf'
-  push:
-    branches:
-      - master
-    paths:
-      - '.github/workflows/build-cuda-ubuntu.yml'
-      - 'test-moe.py'
-      - 'run_suite_moe.py'
-      - 'test-stock.py'
-      - 'calc.py'
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths:
-      - '.github/workflows/build-cuda-ubuntu.yml'
-      - 'test-moe.py'
-      - 'run_suite_moe.py'
-      - 'test-stock.py'
-      - 'calc.py'
+  # (push y pull_request eliminados: el workflow solo corre en workflow_dispatch)
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
@@ -123,3 +107,26 @@ jobs:
             build/bin/*
             build-info.txt
           if-no-files-found: error
+
+  release:
+    name: Release (workflow_dispatch)
+    needs: builds
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Descargar binarios
+        uses: actions/download-artifact@v4
+        with:
+          pattern: llama-*-cuda-ubuntu
+          path: artifacts
+          merge-multiple: true
+
+      - name: Crear GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: llama-cuda-ubuntu-${{ github.sha }}
+          name: "llama.cpp CUDA Ubuntu — ${{ github.sha_short }}"
+          generate_release_notes: true
+          files: artifacts/**/*

@@ -1,0 +1,96 @@
+name: Publish release (artifacts existentes)
+
+# Crea un GitHub Release a partir de los artifacts de un build ya compilado,
+# sin recompilar. El flujo típico:
+#   1. Correr el workflow de build (ej. "CI (CUDA, ubuntu)") manualmente.
+#   2. Correr ESTE workflow manualmente: descarga los artifacts del último
+#      build exitoso (o del run_id indicado) y publica una Release.
+#
+# Útil cuando quieres etiquetar/versionar los binarios sin pagar 20 min de
+# compilación otra vez.
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: 'Qué builds publicar'
+        required: true
+        default: 'cuda-ubuntu'
+        type: choice
+        options:
+          - cuda-ubuntu
+          - cuda-windows
+          - vulkan
+          - all
+      run_id:
+        description: 'Run ID del build (vacío = último exitoso del workflow elegido)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write   # crear la Release
+  actions: read     # descargar artifacts del run del build
+
+jobs:
+  publish:
+    name: publish (${{ matrix.name }})
+    if: ${{ matrix.name == inputs.backend || inputs.backend == 'all' }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cuda-ubuntu
+            workflow: build-cuda-ubuntu.yml
+            pattern: llama-*-cuda-ubuntu
+            tag_prefix: llama-cuda-ubuntu
+            display: CUDA Ubuntu
+          - name: cuda-windows
+            workflow: build-cuda-windows.yml
+            pattern: llama-*-cuda-windows
+            tag_prefix: llama-cuda-windows
+            display: CUDA Windows
+          - name: vulkan
+            workflow: build-vulkan.yml
+            pattern: llama-*-vulkan-*
+            tag_prefix: llama-vulkan
+            display: Vulkan
+
+    steps:
+      - name: Resolver run del build
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${{ inputs.run_id }}" ]; then
+            RUN_ID="${{ inputs.run_id }}"
+          else
+            RUN_ID=$(gh api \
+              "repos/${{ github.repository }}/actions/workflows/${{ matrix.workflow }}/runs?status=success&per_page=1" \
+              --jq '.workflow_runs[0].id')
+          fi
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "::error::No se encontró ningún run exitoso de ${{ matrix.workflow }}"
+            echo "::error::Corre primero el workflow de build, o pasa un run_id válido."
+            exit 1
+          fi
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Run del build: $RUN_ID"
+
+      - name: Descargar artifacts
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ steps.resolve.outputs.run_id }}
+          pattern: ${{ matrix.pattern }}
+          path: artifacts
+          # false: cada artifact queda en su subdirectorio (artifacts/<name>/…)
+          # para conservar el build-info.txt de cada build sin colisiones.
+          merge-multiple: false
+
+      - name: Crear GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ matrix.tag_prefix }}-rel-${{ github.run_id }}
+          name: "llama.cpp ${{ matrix.display }} (build run ${{ steps.resolve.outputs.run_id }})"
+          generate_release_notes: true
+          files: artifacts/**/*
