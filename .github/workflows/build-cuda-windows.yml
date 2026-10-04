@@ -40,17 +40,17 @@ jobs:
           - name: stock
             repo: ggml-org/llama.cpp
             ref: 5266f24da75dc449bd56cbed7addb9c8e4a6a73e
-            cuda: '12.8'
+            cuda: '12.8.0'
             archs: '75;86'
           - name: fork-moecache
             repo: GenerelSchwerz/llama.cpp
             ref: moe-cache
-            cuda: '12.8'
+            cuda: '12.8.0'
             archs: '75;86'
           - name: fork-perf
             repo: thecodacus/llama.cpp
             ref: perf
-            cuda: '12.8'
+            cuda: '12.8.0'
             archs: '75;86'
 
     steps:
