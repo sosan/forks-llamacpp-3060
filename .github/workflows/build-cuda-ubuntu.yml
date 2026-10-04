@@ -104,7 +104,9 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_ARCHITECTURES="${{ matrix.archs }}" \
             -DGGML_CUDA=ON \
-            -DGGML_NATIVE=OFF
+            -DGGML_NATIVE=OFF \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-shlib-undefined" \
+            -DBUILD_TESTING=OFF
           cmake --build build --config Release -j "$(nproc)"
 
       - name: Resumen

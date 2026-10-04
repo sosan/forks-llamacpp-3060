@@ -97,7 +97,8 @@ jobs:
           cmake -S llama.cpp -B build -G "Ninja Multi-Config" ^
             -DCMAKE_CUDA_ARCHITECTURES="%CUDA_ARCHS%" ^
             -DGGML_CUDA=ON ^
-            -DGGML_NATIVE=OFF
+            -DGGML_NATIVE=OFF ^
+            -DBUILD_TESTING=OFF
           cmake --build build --config Release -j %NUMBER_OF_PROCESSORS%
 
       - name: Resumen
