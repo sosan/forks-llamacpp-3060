@@ -32,30 +32,10 @@ permissions:
   actions: read     # descargar artifacts del run del build
 
 jobs:
-  publish:
-    name: publish (${{ matrix.name }})
-    if: ${{ matrix.name == inputs.backend || inputs.backend == 'all' }}
+  publish-cuda-ubuntu:
+    name: publish (cuda-ubuntu)
+    if: inputs.backend == 'cuda-ubuntu' || inputs.backend == 'all'
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: cuda-ubuntu
-            workflow: build-cuda-ubuntu.yml
-            pattern: llama-*-cuda-ubuntu
-            tag_prefix: llama-cuda-ubuntu
-            display: CUDA Ubuntu
-          - name: cuda-windows
-            workflow: build-cuda-windows.yml
-            pattern: llama-*-cuda-windows
-            tag_prefix: llama-cuda-windows
-            display: CUDA Windows
-          - name: vulkan
-            workflow: build-vulkan.yml
-            pattern: llama-*-vulkan-*
-            tag_prefix: llama-vulkan
-            display: Vulkan
-
     steps:
       - name: Resolver run del build
         id: resolve
@@ -66,11 +46,11 @@ jobs:
             RUN_ID="${{ inputs.run_id }}"
           else
             RUN_ID=$(gh api \
-              "repos/${{ github.repository }}/actions/workflows/${{ matrix.workflow }}/runs?status=success&per_page=1" \
+              "repos/${{ github.repository }}/actions/workflows/build-cuda-ubuntu.yml/runs?status=success&per_page=1" \
               --jq '.workflow_runs[0].id')
           fi
           if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
-            echo "::error::No se encontró ningún run exitoso de ${{ matrix.workflow }}"
+            echo "::error::No se encontró ningún run exitoso de build-cuda-ubuntu.yml"
             echo "::error::Corre primero el workflow de build, o pasa un run_id válido."
             exit 1
           fi
@@ -81,7 +61,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           run-id: ${{ steps.resolve.outputs.run_id }}
-          pattern: ${{ matrix.pattern }}
+          pattern: llama-*-cuda-ubuntu
           path: artifacts
           # false: cada artifact queda en su subdirectorio (artifacts/<name>/…)
           # para conservar el build-info.txt de cada build sin colisiones.
@@ -90,7 +70,89 @@ jobs:
       - name: Crear GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ matrix.tag_prefix }}-rel-${{ github.run_id }}
-          name: "llama.cpp ${{ matrix.display }} (build run ${{ steps.resolve.outputs.run_id }})"
+          tag_name: llama-cuda-ubuntu-rel-${{ github.run_id }}
+          name: "llama.cpp CUDA Ubuntu (build run ${{ steps.resolve.outputs.run_id }})"
+          generate_release_notes: true
+          files: artifacts/**/*
+
+  publish-cuda-windows:
+    name: publish (cuda-windows)
+    if: inputs.backend == 'cuda-windows' || inputs.backend == 'all'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Resolver run del build
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${{ inputs.run_id }}" ]; then
+            RUN_ID="${{ inputs.run_id }}"
+          else
+            RUN_ID=$(gh api \
+              "repos/${{ github.repository }}/actions/workflows/build-cuda-windows.yml/runs?status=success&per_page=1" \
+              --jq '.workflow_runs[0].id')
+          fi
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "::error::No se encontró ningún run exitoso de build-cuda-windows.yml"
+            echo "::error::Corre primero el workflow de build, o pasa un run_id válido."
+            exit 1
+          fi
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Run del build: $RUN_ID"
+
+      - name: Descargar artifacts
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ steps.resolve.outputs.run_id }}
+          pattern: llama-*-cuda-windows
+          path: artifacts
+          merge-multiple: false
+
+      - name: Crear GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: llama-cuda-windows-rel-${{ github.run_id }}
+          name: "llama.cpp CUDA Windows (build run ${{ steps.resolve.outputs.run_id }})"
+          generate_release_notes: true
+          files: artifacts/**/*
+
+  publish-vulkan:
+    name: publish (vulkan)
+    if: inputs.backend == 'vulkan' || inputs.backend == 'all'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Resolver run del build
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${{ inputs.run_id }}" ]; then
+            RUN_ID="${{ inputs.run_id }}"
+          else
+            RUN_ID=$(gh api \
+              "repos/${{ github.repository }}/actions/workflows/build-vulkan.yml/runs?status=success&per_page=1" \
+              --jq '.workflow_runs[0].id')
+          fi
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "::error::No se encontró ningún run exitoso de build-vulkan.yml"
+            echo "::error::Corre primero el workflow de build, o pasa un run_id válido."
+            exit 1
+          fi
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Run del build: $RUN_ID"
+
+      - name: Descargar artifacts
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ steps.resolve.outputs.run_id }}
+          pattern: llama-*-vulkan-*
+          path: artifacts
+          merge-multiple: false
+
+      - name: Crear GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: llama-vulkan-rel-${{ github.run_id }}
+          name: "llama.cpp Vulkan (build run ${{ steps.resolve.outputs.run_id }})"
           generate_release_notes: true
           files: artifacts/**/*
